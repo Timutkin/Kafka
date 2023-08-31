@@ -45,27 +45,14 @@ producer:
       key-serializer: org.apache.kafka.common.serialization.StringSerializer
       value-serializer: org.apache.kafka.common.serialization.StringSerializer
 ```
-Таким образом сконфигурируется ProducerFactory, которая внедрится в объект KafkaTemplate. Отправка сообщений осуществляется посредством KafkaTemplate :
-```java
-@RequiredArgsConstructor
-@Component
-public class KafkaProducerTest {
 
-    @Value("${kafka.topics.test-topic}")
-    private String topic;
-
-    private final KafkaTemplate<Object, Object> kafkaTemplate;
-    
-    public void sendMessages() {
-        kafkaTemplate.send("message", topic);
-    }
-}
-```
 Точно также можно выполнить настройку продюсера без использования файла конфигурации
 ```java
 @Configuration
-public class ApplicationConfig {
-
+public class KafkaProducerConfig {
+    /*
+            Данный бин должен быть вынесен в отдельный класс
+     */
     @Bean
     public ObjectMapper objectMapper() {
         return JacksonUtils.enhancedObjectMapper();
@@ -90,8 +77,54 @@ public class ApplicationConfig {
     }
 }
 ```
+Таким образом сконфигурируется ProducerFactory, которая внедрится в объект KafkaTemplate. Отправка сообщений осуществляется посредством KafkaTemplate :
+```java
+@RequiredArgsConstructor
+@Component
+public class KafkaProducerTest {
+
+    @Value("${kafka.topics.test-topic}")
+    private String topic;
+
+    private final KafkaTemplate<Object, Object> kafkaTemplate;
+    
+    public void sendMessages() {
+        kafkaTemplate.send("message", topic);
+    }
+}
+```
+sendMessage overloading methods - [Spring Dock](https://docs.spring.io/spring-kafka/reference/html/#kafka-template)
+
+Хочу отметить, что метод sendMessage возвращает `CompletableFuture<SendResult<K, V>>`, поэтому возможна следующая обработка результата отправки сообщения:
+```java
+@RequiredArgsConstructor
+@Component
+public class KafkaProducerTest {
+
+    @Value("${kafka.topics.test-topic}")
+    private String topic;
+
+    private final KafkaTemplate<Object, Object> kafkaTemplate;
+
+    public void sendMessages() {
+        kafkaTemplate.send("message", topic).whenComplete(
+                (result, ex) -> {
+                    if (ex == null){
+                        // DO SMTH
+                    }
+                    else{
+                        // DO SMTH
+                    }
+                }
+        );
+    }
+}
+```
+Считаю, что неотправленное сообщение можно отправлять в специализированный топик, дабы обработать его позже. Также для отправки сообщения можно настроить ретраи (retry), 
+об этом будем написано ниже.
+
 Также хочу отметить, что Вы можете комбинировать оба способа, в случае, когда Вам нужно определить несколько ProducerFactory для разных объектов KafkaTemplate, 
-при этом часть конфигурации не меняется. Например, объекты сериализации. Настоятельно рекомендую придерживаться этого подхода.
+при этом часть конфигурации не меняется. Например, объекты сериализации. Рекомендую придерживаться этого подхода.
 
 ### Дополнительные настройки продюсера
 #### Поверхностное описание функции sendMessage
@@ -106,11 +139,37 @@ key-defined - партиция определяется по ключу (key_has
 batch size
 linger.ms
 #### Определение параметров для ProducerFactory
-- `BATCH_SIZE_CONFIG` - кафка отправляет сообщения пачками, по достижению этой величины сообщения будут отправлены
-- `LINGER_MS_CONFIG` - время по истечению которого сообщения будет отправлено, в случае, если не накоплено достаточное количество сообщений
-- При желании можете также определить алгоритм сжатия сообщения при помощи параметра `COMPRESSION_TYPE_CONFIG` 
+- `BATCH_SIZE_CONFIG` - кафка отправляет сообщения пачками, по достижению этой величины сообщения будут отправлены, этот параметр указывается в байтах (по умолчанию это 16 КБ)
+- `LINGER_MS_CONFIG` - время по истечению которого сообщения будет отправлено, в случае, если не накоплено достаточное количество сообщений.
 
-Если batch size и linger.ms не достигли граничных значений, но при этом у нас собраны батчи для одно брокера и разных партиций, суммарно для них превышен batch size или linger.ms, то данные будут отправлены.
-#### Отправка сообщений 
+  Если batch size и linger.ms не достигли граничных значений, но при этом у нас собраны батчи для одно брокера и разных партиций, суммарно для них превышен batch size или linger.ms, то данные будут отправлены.
+- При желании можете также определить алгоритм сжатия сообщения при помощи параметра `COMPRESSION_TYPE_CONFIG`. 
+
+    Рекомендую использовать `snappy` или `lz4`, поскольку оба имеют оптимальную скорость и степень сжатия. С другой стороны, `Gzip` будет иметь самую высокую степень сжатия, но он не очень быстрый.
+
+
+    snappy is very useful if your messages are text-based, for example, JSON documents or logs
+    snappy has a good balance of compression ratio or CPU.
+
+- `ACKS_CONFIG` - гарантии надежности и доставки сообщений.
+
+    KafkaProducer обеспечивает надежность данных с помощью параметра конфигурации acks. Параметр acks указывает, сколько подтверждений должен получить продюсер, чтобы запись считалась доставленной брокеру. 
+    Варианты значений:
+
+  1. none (1) — продюсер считает записи успешно доставленными после их отправки на брокера. Никакого подтверждения он не ждет.
+
+  2. one (0) — продюсер ждет от брокера лидера подтверждение того, что он занес запись в лог. 
+
+  3. all (-1) — продюсер ждет подтверждения от брокера лидера и ISR реплик. 
+
+    У разных приложений разные требования, и здесь нужно найти компромисс: или это будет высокая пропускная способность, но с риском потери данных, 
+    или гарантия надежности в ущерб пропускной способности.
+
+
+- `DELIVERY_TIMEOUT_MS_CONFIG` - время отправки сообщения, по истечению которого доставка сообщения считается неудачной, [подробнее](https://www.conduktor.io/kafka/kafka-producer-retries/), этот параметр по сути определяет таймаут для ретраев. По умолчанию delivery.timeout.ms равен двум минутам
+
+Подробнее узнать о всех параметрах вы можете в [официальной документации](https://kafka.apache.org/documentation/#producerconfigs) 
+
+
  
 
