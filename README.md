@@ -138,7 +138,8 @@ key-defined - партиция определяется по ключу (key_has
 5. accumulate batch - сообщение сразу не отправляется какому-то брокеру, сообщения собираются в батч,существует две настройки:
 batch size
 linger.ms
-#### Определение параметров для ProducerFactory
+#### Определение параметров для ProducerFactory 
+- `CLIENT_ID_CONFIG` 
 - `BATCH_SIZE_CONFIG` - кафка отправляет сообщения пачками, по достижению этой величины сообщения будут отправлены, этот параметр указывается в байтах (по умолчанию это 16 КБ).
 
   Малый размер пакета сделает пакетную обработку менее распространенной и может снизить пропускную способность (нулевой размер пакета полностью отключит пакетную обработку). 
@@ -200,6 +201,103 @@ linger.ms
 
 Но обязательно при отправке указывать ключ сообщения, чтобы все сообщения, относящиеся к одному и той же сущности падали в одну и ту же партицию, дабы все возможные операции проходили в том порядке, в котором были отправлены сообщения. В нашем случае ключом может выступать id сущности.
 
+`Вся дальнейшая настройка будет производится при помощи java-кода, точно такую же настройку вы можете выполнить при помощи файла application.yml `
+### Минимальная настройка потребителя
+- `KEY_DESERIALIZER_CLASS_CONFIG`
+- `VALUE_DESERIALIZER_CLASS_CONFIG`
+  
+  Когда десериализатору не удается десериализовать сообщение, Spring не имеет возможности обработать эту проблему, поскольку она возникает до возврата poll(). 
+  Для решения этой проблемы был введен десериализатор ErrorHandlingDeserializer. Этот десериализатор делегирует реальному десериализатору (ключ или значение). 
+  Если делегату не удается десериализовать содержимое записи, то ErrorHandlingDeserializer возвращает нулевое значение и DeserializationException в заголовке, 
+  содержащем причину и необработанные байты.
+
+  Можно использовать конструктор DefaultKafkaConsumerFactory, который принимает объекты Deserializer с ключом и значением и подключает к ним соответствующие 
+  экземпляры ErrorHandlingDeserializer, которые вы сконфигурировали с соответствующими делегатами. В качестве альтернативы можно использовать свойства конфигурации 
+  потребителя (которые используются ErrorHandlingDeserializer) для инстанцирования делегатов. Имена свойств ErrorHandlingDeserializer.KEY_DESERIALIZER_CLASS и ErrorHandlingDeserializer.VALUE_DESERIALIZER_CLASS. 
+  В качестве значения свойства может выступать класс или имя класса. В следующем примере показано, как установить эти свойства:
+```java
+// other props
+props.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, ErrorHandlingDeserializer.class);
+props.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, ErrorHandlingDeserializer.class);
+props.put(ErrorHandlingDeserializer.KEY_DESERIALIZER_CLASS, JsonDeserializer.class);
+props.put(JsonDeserializer.KEY_DEFAULT_TYPE, "com.example.MyKey")
+props.put(ErrorHandlingDeserializer.VALUE_DESERIALIZER_CLASS, JsonDeserializer.class.getName());
+props.put(JsonDeserializer.VALUE_DEFAULT_TYPE, "com.example.MyValue")
+props.put(JsonDeserializer.TRUSTED_PACKAGES, "com.example")
+return new DefaultKafkaConsumerFactory<>(props);
+```
+  Более подробно об обработке исключений будет написано ниже
+
+
+- `AUTO_OFFSET_RESET_CONFIG` -
+  Когда только создается новая группа потребителей и ее потребители назначаются тематическим разделам, они должны решить, с какой точки начинать опрос сообщений. 
+  Если потребителю не было дано указание опрашивать сообщения с определенного смещения (что встречается реже), то возможны два основных варианта. Во-первых, потребитель
+  может читать сообщения с начала раздела, обрабатывая каждое сообщение, присутствующее в журнале раздела. Второй вариант - читать новые сообщения, записанные в тему, 
+  только после того, как потребитель начал прослушивание.
+
+  Параметры: 
+    - `earliest` - с первых сообщений
+    - `latest` - последние сообщения
+    - `none`
+Итоговая базовая настройка ConsumerFactor :
+```java
+    @Bean
+    public ConsumerFactory<Object, Object> consumerFactory(KafkaProperties kafkaProperties){
+        final var props = kafkaProperties.buildConsumerProperties();
+        props.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, ErrorHandlingDeserializer.class);
+        props.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, ErrorHandlingDeserializer.class);
+        props.put(ErrorHandlingDeserializer.KEY_DESERIALIZER_CLASS, JsonDeserializer.class);
+        props.put(JsonDeserializer.KEY_DEFAULT_TYPE, "com.example.MyKey");
+        props.put(ErrorHandlingDeserializer.VALUE_DESERIALIZER_CLASS, JsonDeserializer.class.getName());
+        props.put(JsonDeserializer.VALUE_DEFAULT_TYPE, "com.example.MyValue");
+        props.put(JsonDeserializer.TRUSTED_PACKAGES, "com.example");
+        props.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest");
+        return new DefaultKafkaConsumerFactory<>(props);
+    }
+```
+#### Определение ConcurrentKafkaListenerContainerFactory
+Позволяет создавать консюмеров, которые могут обрабатывать сообщения из нескольких партиций Kafka одновременно,
+также настраивать параметры такие как количество потоков, хэндлинг и т.д.
+```java
+@Bean
+    public ConcurrentKafkaListenerContainerFactory<Object, Object> kafkaListenerContainerFactory(ConsumerFactory) {
+        ConcurrentKafkaListenerContainerFactory<Object, Object> kafkaListenerContainerFactory = new ConcurrentKafkaListenerContainerFactory<>();
+        // Настройка фабрики для создания консьюмера Kafka
+        kafkaListenerContainerFactory.setConsumerFactory(consumerFactory);
+        // Обработка сообщений в 4 потока
+        kafkaListenerContainerFactory.setConcurrency(4);
+        return kafkaListenerContainerFactory;
+    }
+```
+
+#### Потребление сообщений
+```java
+@KafkaListener(
+            // Определяет группу консюмера
+            id = "consumer-group-1",
+            // Определяет топик откуда читаем
+            topics = "${kafka.topics.test-topic}",
+            // ВАЖНО: определяет фабрику, которую мы используем. Иначе используется фабрика по умолчанию и чтение происходит в однопоточном режиме
+            containerFactory = "kafkaListenerContainerFactory")
+    public void handle(@Payload JsonMessage message) {
+        readMessage(message);
+    }
+```
+  
+  
+
+
+### Семантика доставки
+ - #### At-Most-Once Delivery - Возможна потеря сообщений
+   Дабы реализовать данный тип семантики необходимо на стороне потребителя необходимо установить параметр `ENABLE_AUTO_COMMIT_CONFIG` = true
+ - #### At-Most-Once Delivery - Возможна повторная обработка сообщений
+   Дабы реализовать данный тип семантики необходимо на стороне производителя указать следующие параметры:
+   - `ACKS_CONFIG` = 1
+   - `ENABLE_IDEMPOTENCE_CONFIG` = true
+   
+   На стороне потребителя:
+   - `ENABLE_AUTO_COMMIT_CONFIG` = false
+   
 
 
  
