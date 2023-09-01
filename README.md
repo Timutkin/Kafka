@@ -205,6 +205,8 @@ linger.ms
 ### Минимальная настройка потребителя
 - `KEY_DESERIALIZER_CLASS_CONFIG`
 - `VALUE_DESERIALIZER_CLASS_CONFIG`
+- `VALUE_DEFAULT_TYPE`
+- `KEY_DEFAULT_TYPE`
   
   Когда десериализатору не удается десериализовать сообщение, Spring не имеет возможности обработать эту проблему, поскольку она возникает до возврата poll(). 
   Для решения этой проблемы был введен десериализатор ErrorHandlingDeserializer. Этот десериализатор делегирует реальному десериализатору (ключ или значение). 
@@ -283,9 +285,6 @@ return new DefaultKafkaConsumerFactory<>(props);
         readMessage(message);
     }
 ```
-  
-  
-
 
 ### Семантика доставки
  - #### At-Most-Once Delivery - Возможна потеря сообщений
@@ -297,7 +296,8 @@ return new DefaultKafkaConsumerFactory<>(props);
    
    На стороне потребителя:
    - `ENABLE_AUTO_COMMIT_CONFIG` = false
-   
+ 
+## [Работа с заголовками](https://memorynotfound.com/spring-kafka-adding-custom-header-kafka-message-example/)
 
 
  
