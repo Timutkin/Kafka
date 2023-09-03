@@ -262,7 +262,7 @@ return new DefaultKafkaConsumerFactory<>(props);
 также настраивать параметры такие как количество потоков, хэндлинг и т.д.
 ```java
 @Bean
-    public ConcurrentKafkaListenerContainerFactory<Object, Object> kafkaListenerContainerFactory(ConsumerFactory) {
+    public ConcurrentKafkaListenerContainerFactory<Object, Object> kafkaListenerContainerFactory(ConsumerFactory consumerFactory) {
         ConcurrentKafkaListenerContainerFactory<Object, Object> kafkaListenerContainerFactory = new ConcurrentKafkaListenerContainerFactory<>();
         // Настройка фабрики для создания консьюмера Kafka
         kafkaListenerContainerFactory.setConsumerFactory(consumerFactory);
@@ -285,6 +285,128 @@ return new DefaultKafkaConsumerFactory<>(props);
         readMessage(message);
     }
 ```
+#### Подтверждение получения сообщения
+```java
+@KafkaListener(
+            // Определяет группу консюмера
+            id = "consumer-group-1",
+            // Определяет топик откуда читаем
+            topics = "${kafka.topics.test-topic}",
+            // ВАЖНО: определяет фабрику, которую мы используем. Иначе используется фабрика по умолчанию и чтение происходит в однопоточном режиме
+            containerFactory = "kafkaListenerContainerFactory")
+    public void handle(
+            @Payload JsonMessage message,
+            Acknowledgment ack
+        ) {
+        readMessage(message);
+        ack.acknowledge();
+    }
+```
+
+#### Обработка исключений
+```java
+
+@RequiredArgsConstructor
+public class KafkaConfiguration {
+
+    private static final String DLT_TOPIC_SUFFIX = ".dlt";
+
+    
+    @Bean
+    public KafkaTemplate<Object, Object> kafkaTemplate(ProducerFactory<Object, Object> producerFactory) {
+        return new KafkaTemplate<>(producerFactory);
+    }
+
+    @Bean
+    public ProducerFactory<Object, Object> producerFactory(KafkaProperties kafkaProperties){
+        final var properties = kafkaProperties.buildProducerProperties();
+        properties.put(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG, StringSerializer.class);
+        properties.put(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, DltMessageSerializer.class);
+        return new DefaultKafkaProducerFactory<>(properties);
+    }
+
+    @Bean
+    public ConsumerFactory<Object, Object> consumerFactory(KafkaProperties kafkaProperties){
+        final var props = kafkaProperties.buildConsumerProperties();
+        props.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, ErrorHandlingDeserializer.class);
+        props.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, ErrorHandlingDeserializer.class);
+        props.put(ErrorHandlingDeserializer.KEY_DESERIALIZER_CLASS, JsonDeserializer.class);
+        props.put(JsonDeserializer.KEY_DEFAULT_TYPE, "com.example.MyKey");
+        props.put(ErrorHandlingDeserializer.VALUE_DESERIALIZER_CLASS, JsonDeserializer.class.getName());
+        props.put(JsonDeserializer.VALUE_DEFAULT_TYPE, "com.example.MyValue");
+        props.put(JsonDeserializer.TRUSTED_PACKAGES, "com.example");
+        props.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest");
+        return new DefaultKafkaConsumerFactory<>(props);
+    }
+
+    @Bean
+    public ConcurrentKafkaListenerContainerFactory<Object, Object> kafkaListenerContainerFactory(
+            DefaultErrorHandler errorHandler,
+            ConsumerFactory<Object, Object> consumerFactory
+    ) {
+        // Позволяет создавать консюмеров, которые могут обрабатывать сообщения из нескольких партиций Kafka одновременно,
+        // а также настраивать параметры такие как количество потоков, хэндлинг и т.д.
+        ConcurrentKafkaListenerContainerFactory<Object, Object> kafkaListenerContainerFactory = new ConcurrentKafkaListenerContainerFactory<>();
+        // Настройка фабрики для создания консьюмера Kafka
+        kafkaListenerContainerFactory.setConsumerFactory(consumerFactory);
+        // Возврат сообщений в DLT очередь
+        kafkaListenerContainerFactory.setCommonErrorHandler(errorHandler);
+        // Обработка сообщений в 4 потока
+        kafkaListenerContainerFactory.setConcurrency(4);
+        return kafkaListenerContainerFactory;
+    }
+
+    /**
+     * Публикатор в dead-letter topic.
+     */
+    @Bean
+    public DeadLetterPublishingRecoverer publisher(KafkaTemplate<Object, Object> bytesTemplate) {
+        //  Определяем логику выбора партиции для отправки сообщения в DLT.
+        //  В данном случае, создаём новый объект TopicPartition, используя имя топика (consumerRecord.topic()) и добавляя суффикс DLT_TOPIC_SUFFIX,
+        //  а также номер партиции (consumerRecord.partition()).
+        //  Следовательно в DLT топике должно быть столько партиций сколько и в топике откуда читаем
+        return new DeadLetterPublishingRecoverer(bytesTemplate, (consumerRecord, exception) ->
+                new TopicPartition(consumerRecord.topic() + DLT_TOPIC_SUFFIX, consumerRecord.partition()));
+    }
+
+    /**
+     * Обработчик исключений при получении сообщений из kafka по умолчанию.
+     */
+    @Bean
+    public DefaultErrorHandler errorHandler(DeadLetterPublishingRecoverer deadLetterPublishingRecoverer) {
+        final var handler = new DefaultErrorHandler(deadLetterPublishingRecoverer);
+        // Обрабатываем любые исключения и отправляем в DLT
+        handler.addNotRetryableExceptions(Exception.class);
+        return handler;
+    }
+}
+/**
+ * Кастомный сериалайзер.
+ */
+public class DltMessageSerializer<T> implements Serializer<T> {
+
+    private final ObjectMapper objectMapper = new ObjectMapper();
+
+    @Override
+    public void configure(Map<String, ?> configs, boolean isKey) {
+        // Дополнительная конфигурация не требуется.
+    }
+
+    @Override
+    public byte[] serialize(String topic, T data) {
+        try {
+            return objectMapper.writeValueAsBytes(data);
+        } catch (JsonProcessingException e) {
+            throw new SerializationException("Error when serializing to JSON", e);
+        }
+    }
+
+    @Override
+    public void close() {
+        // Дополнительная конфигурация не требуется.
+    }
+}
+```
 
 ### Семантика доставки
  - #### At-Most-Once Delivery - Возможна потеря сообщений
@@ -297,7 +419,9 @@ return new DefaultKafkaConsumerFactory<>(props);
    На стороне потребителя:
    - `ENABLE_AUTO_COMMIT_CONFIG` = false
  
-## [Работа с заголовками](https://memorynotfound.com/spring-kafka-adding-custom-header-kafka-message-example/)
+### [Работа с заголовками](https://memorynotfound.com/spring-kafka-adding-custom-header-kafka-message-example/)
+
+### [Optimizing Kafka consumers](https://strimzi.io/blog/2021/01/07/consumer-tuning/)
 
 
  
